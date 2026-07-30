@@ -1,11 +1,12 @@
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
 # Streamlit 페이지 기본 설정
 st.set_page_config(
-    page_title="전국 인구구조 지도",
+    page_title="전국 인구구조 및 고령화 지도",
     page_icon="🗺️",
     layout="wide",
 )
@@ -53,9 +54,6 @@ def load_data():
     df["sigungu_code"] = df["코드"].str[:5]
 
     # 행정구역 개편에 따른 과거 시군구 코드 매핑 변환
-    # - 강원: 42 -> 51
-    # - 전북: 45 -> 52
-    # - 군위군: 47720 -> 27720
     def remap_code(code):
         if code == "47720":
             return "27720"
@@ -96,48 +94,8 @@ def load_data():
 ) = load_data()
 
 # -----------------------------------------------------------------------------
-# 사이드바 컨트롤러 (지표, 연도, 시도 선택, 애니메이션 모드)
+# 전체 연도 시군구 및 전국 인구 지표 집계
 # -----------------------------------------------------------------------------
-st.sidebar.title("⚙️ 설정")
-
-# 1. 지표 선택
-metric_option = st.sidebar.radio(
-    "📊 분석 지표 선택",
-    ["고령화율 (65세 이상)", "유소년 비율 (0~14세)"],
-    index=0,
-)
-
-# 2. 애니메이션 재생 여부 선택
-enable_animation = st.sidebar.checkbox(
-    "▶️ 연도별 시계열 애니메이션 모드",
-    value=False,
-    help="체크 시 지도 하단 플레이 버튼으로 연도별 변화 과정을 재생할 수 있습니다.",
-)
-
-# 애니메이션 모드가 아닐 때만 연도 선택 슬라이더 활성화
-available_years = sorted(df_raw["연도"].unique().tolist())
-if not enable_animation:
-    selected_year = st.sidebar.slider(
-        "📅 연도 선택",
-        min_value=int(min(available_years)),
-        max_value=int(max(available_years)),
-        value=int(max(available_years)),
-        step=1,
-    )
-else:
-    # 애니메이션 모드일 경우 가장 최신 연도를 기본값으로 사용 (카드 및 표 표시용)
-    selected_year = int(max(available_years))
-    st.sidebar.info("💡 애니메이션 모드가 활성화되어 슬라이더가 비활성화됩니다.")
-
-# 3. 시도 선택 드롭다운 (지역 확대)
-sido_list = ["전국"] + list(df_raw["시도"].unique())
-sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전국"]
-selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
-
-# -----------------------------------------------------------------------------
-# 데이터 집계 및 비율 계산
-# -----------------------------------------------------------------------------
-# 연도별, 시군구별 인구 합산
 grouped_all = (
     df_raw.groupby(["연도", "sigungu_code", "시도", "시군구"])[total_cols]
     .sum()
@@ -151,28 +109,60 @@ grouped_all["유소년인구"] = grouped_all[youth_cols].sum(axis=1)
 grouped_all["고령화율"] = (grouped_all["고령인구"] / grouped_all["총인구"] * 100).round(1)
 grouped_all["유소년비율"] = (grouped_all["유소년인구"] / grouped_all["총인구"] * 100).round(1)
 
-# 애니메이션을 위한 정렬 (연도순)
-grouped_all = grouped_all.sort_values(by=["연도", "sigungu_code"])
+# 노령화지수 안전 계산 (유소년 0명 방지)
+grouped_all["노령화지수"] = (
+    grouped_all["고령인구"] / grouped_all["유소년인구"].replace(0, float("nan")) * 100
+).fillna(0).round(1)
 
-# 선택된 연도 데이터 추출 (상단 지표 카드 및 하단 표용)
+# -----------------------------------------------------------------------------
+# 사이드바 컨트롤러
+# -----------------------------------------------------------------------------
+st.sidebar.title("⚙️ 설정")
+
+# 1. 지표 선택
+metric_option = st.sidebar.radio(
+    "📊 분석 지표 선택",
+    ["고령화율 (65세 이상)", "유소년 비율 (0~14세)", "노령화지수 (인구 역전 지표)"],
+    index=0,
+)
+
+# 2. 연도 선택 슬라이더
+available_years = sorted(df_raw["연도"].unique().tolist())
+selected_year = st.sidebar.slider(
+    "📅 연도 선택",
+    min_value=int(min(available_years)),
+    max_value=int(max(available_years)),
+    value=int(max(available_years)),
+    step=1,
+)
+
+# 3. 시도 선택 드롭다운
+sido_list = ["전국"] + list(df_raw["시도"].unique())
+sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전국"]
+selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
+
+# -----------------------------------------------------------------------------
+# 선택된 연도의 데이터 추출 및 지표 설정
+# -----------------------------------------------------------------------------
 grouped = grouped_all[grouped_all["연도"] == selected_year].copy()
 
-# 전국 합계 계산
+# 전국 총합 계산
 national_total_pop = grouped["총인구"].sum()
 national_elderly_pop = grouped["고령인구"].sum()
 national_youth_pop = grouped["유소년인구"].sum()
 
 national_elderly_rate = round(national_elderly_pop / national_total_pop * 100, 1)
 national_youth_rate = round(national_youth_pop / national_total_pop * 100, 1)
+national_aging_idx = round(national_elderly_pop / (national_youth_pop if national_youth_pop > 0 else 1) * 100, 1)
 
-# 선택된 지표에 따른 타겟 칼럼 및 색상 구간(5단계) 설정
+# 지표별 안전한 구간(bins) 및 색상 설정
 if metric_option == "고령화율 (65세 이상)":
     target_col = "고령화율"
     metric_name = "고령화율"
+    unit_str = "%"
     national_rate = national_elderly_rate
 
-    # 고령화율 고정 구간: 19%, 23%, 28%, 38%
-    bins = [-1, 19, 23, 28, 38, 100]
+    bins = [-1.0, 19.0, 23.0, 28.0, 38.0, float("inf")]
     labels = [
         "1. 19% 미만",
         "2. 19% 이상 ~ 23% 미만",
@@ -187,13 +177,13 @@ if metric_option == "고령화율 (65세 이상)":
         "4. 28% 이상 ~ 38% 미만": "#31a354",
         "5. 38% 이상": "#006d2c",
     }
-else:
+elif metric_option == "유소년 비율 (0~14세)":
     target_col = "유소년비율"
     metric_name = "유소년 비율"
+    unit_str = "%"
     national_rate = national_youth_rate
 
-    # 유소년 비율 맞춤 구간: 8%, 10%, 12%, 14%
-    bins = [-1, 8, 10, 12, 14, 100]
+    bins = [-1.0, 8.0, 10.0, 12.0, 14.0, float("inf")]
     labels = [
         "1. 8% 미만",
         "2. 8% 이상 ~ 10% 미만",
@@ -208,67 +198,92 @@ else:
         "4. 12% 이상 ~ 14% 미만": "#fc8d59",
         "5. 14% 이상": "#d7301f",
     }
+else:  # 노령화지수
+    target_col = "노령화지수"
+    metric_name = "노령화지수"
+    unit_str = ""
+    national_rate = national_aging_idx
 
-# 전체 데이터셋 및 선택 연도 데이터셋 모두 범주화 적용
-grouped_all["비율_구간"] = pd.cut(
-    grouped_all[target_col], bins=bins, labels=labels, right=False
-)
+    bins = [-1.0, 100.0, 200.0, 300.0, 500.0, float("inf")]
+    labels = [
+        "1. 100 미만 (유소년 > 고령)",
+        "2. 100 이상 ~ 200 미만",
+        "3. 200 이상 ~ 300 미만",
+        "4. 300 이상 ~ 500 미만",
+        "5. 500 이상 (고령 압도)",
+    ]
+    color_map = {
+        "1. 100 미만 (유소년 > 고령)": "#f7fcf5",
+        "2. 100 이상 ~ 200 미만": "#fcbba1",
+        "3. 200 이상 ~ 300 미만": "#fc9272",
+        "4. 300 이상 ~ 500 미만": "#fb6a4a",
+        "5. 500 이상 (고령 압도)": "#67000d",
+    }
+
 grouped["비율_구간"] = pd.cut(
     grouped[target_col], bins=bins, labels=labels, right=False
+)
+
+# 데이터 다운로드 버튼 (사이드바 하단)
+st.sidebar.markdown("---")
+st.sidebar.subheader("📥 데이터 다운로드")
+csv_data = grouped[
+    ["연도", "시도", "시군구", "sigungu_code", "총인구", "고령인구", "유소년인구", target_col]
+].to_csv(index=False, encoding="utf-8-sig")
+
+st.sidebar.download_button(
+    label=f"📄 {selected_year}년 {metric_name} CSV 다운로드",
+    data=csv_data,
+    file_name=f"korea_population_{selected_year}.csv",
+    mime="text/csv",
 )
 
 # -----------------------------------------------------------------------------
 # 메인 화면 구성
 # -----------------------------------------------------------------------------
-title_year_str = "지난 12년간 변화" if enable_animation else f"{selected_year}년"
-st.title(f"🗺️ 전국 시군구 {metric_name} 지도 ({title_year_str})")
+st.title(f"🗺️ 전국 시군구 {metric_name} 지도 ({selected_year}년)")
 st.caption(
     f"선택한 지표({metric_name})를 기준으로 시군구별 인구 비율을 5단계 구분도로 시각화합니다."
 )
 
-# 최고 / 최저 지역 추출
-max_row = grouped.loc[grouped[target_col].idxmax()]
-min_row = grouped.loc[grouped[target_col].idxmin()]
+# 최고 / 최저 지역 안전 추출
+max_idx = grouped[target_col].idxmax()
+min_idx = grouped[target_col].idxmin()
 
-# 지도 상단 지표 카드 3개 나란히 배치
+max_row = grouped.loc[max_idx]
+min_row = grouped.loc[min_idx]
+
+# 지도 상단 지표 카드 3개
 col_m1, col_m2, col_m3 = st.columns(3)
 
 with col_m1:
     st.metric(
-        label=f"🌐 전국 평균 {metric_name} ({selected_year}년)",
-        value=f"{national_rate:.1f}%",
+        label=f"🌐 전국 평균 {metric_name}",
+        value=f"{national_rate:.1f}{unit_str}",
     )
 
 with col_m2:
     st.metric(
-        label=f"🔴 최고 {metric_name} 지역 ({selected_year}년)",
+        label=f"🔴 최고 {metric_name} 지역",
         value=f"{max_row['시도']} {max_row['시군구']}",
-        delta=f"{max_row[target_col]:.1f}%",
+        delta=f"{max_row[target_col]:.1f}{unit_str}",
     )
 
 with col_m3:
     st.metric(
-        label=f"🔵 최저 {metric_name} 지역 ({selected_year}년)",
+        label=f"🔵 최저 {metric_name} 지역",
         value=f"{min_row['시도']} {min_row['시군구']}",
-        delta=f"{min_row[target_col]:.1f}%",
+        delta=f"{min_row[target_col]:.1f}{unit_str}",
     )
 
 st.markdown("---")
 
-# 시도 선택에 따른 지도 바운딩 위치 변경
+# 시도 선택 위치 반영
 map_setting = SIDO_CENTER_MAP.get(selected_sido, SIDO_CENTER_MAP["전국"])
-
-# 애니메이션 모드 여부에 따른 데이터소스 및 타임라인 프레임 설정
-if enable_animation:
-    fig_data = grouped_all
-    animation_frame = "연도"
-else:
-    fig_data = grouped
-    animation_frame = None
 
 # Plotly 구분도 생성
 fig = px.choropleth_mapbox(
-    fig_data,
+    grouped,
     geojson=geojson_data,
     locations="sigungu_code",
     featureidkey="properties.코드",
@@ -279,16 +294,15 @@ fig = px.choropleth_mapbox(
     hover_data={
         "sigungu_code": False,
         "시도": True,
-        target_col: ":.1f%",
+        target_col: f":.1f{unit_str}",
         "총인구": ":,명",
-        "고령인구": ":,명" if metric_option == "고령화율 (65세 이상)" else False,
-        "유소년인구": ":,명" if metric_option == "유소년 비율 (0~14세)" else False,
+        "고령인구": ":,명",
+        "유소년인구": ":,명",
         "비율_구간": False,
     },
-    animation_frame=animation_frame,  # 애니메이션 활성화 시 프레임 축 설정
     center=map_setting["center"],
     zoom=map_setting["zoom"],
-    mapbox_style="white-bg",  # 타일 없이 경계선만 표시
+    mapbox_style="white-bg",
 )
 
 fig.update_layout(
@@ -298,23 +312,9 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01),
 )
 
-# 애니메이션 모드일 때 슬라이더 컨트롤 및 트랜지션 세부 설정
-if enable_animation:
-    fig.update_layout(
-        sliders=[
-            dict(
-                active=len(available_years) - 1,
-                currentvalue={"prefix": "📅 연도: "},
-                pad={"t": 20},
-            )
-        ]
-    )
-
 st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# 경계 지도 데이터 미매핑 지역 안내
-# -----------------------------------------------------------------------------
+# 경계 데이터 미매핑 안내
 unmapped = grouped[~grouped["sigungu_code"].isin(valid_geojson_codes)]
 if not unmapped.empty:
     unmapped_names = (
@@ -328,7 +328,96 @@ if not unmapped.empty:
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 하단 표 영역 (상위 10개 / 하위 10개)
+# 📈 12년간 인구구조 추이 선 그래프
+# -----------------------------------------------------------------------------
+st.subheader("📈 지난 12년간 주요 인구 지표 추이 분석")
+
+national_trend = (
+    grouped_all.groupby("연도")[["총인구", "고령인구", "유소년인구"]]
+    .sum()
+    .reset_index()
+)
+national_trend["고령화율"] = (
+    national_trend["고령인구"] / national_trend["총인구"] * 100
+).round(1)
+national_trend["유소년비율"] = (
+    national_trend["유소년인구"] / national_trend["총인구"] * 100
+).round(1)
+
+col_chart1, col_chart2 = st.columns(2)
+
+with col_chart1:
+    fig_trend = go.Figure()
+    fig_trend.add_trace(
+        go.Scatter(
+            x=national_trend["연도"],
+            y=national_trend["유소년비율"],
+            mode="lines+markers",
+            name="유소년 비율 (%)",
+            line=dict(color="#fc8d59", width=3),
+        )
+    )
+    fig_trend.add_trace(
+        go.Scatter(
+            x=national_trend["연도"],
+            y=national_trend["고령화율"],
+            mode="lines+markers",
+            name="고령화율 (%)",
+            line=dict(color="#31a354", width=3),
+        )
+    )
+
+    fig_trend.update_layout(
+        title="전국 유소년 비율 vs 고령화율 12년 추이",
+        xaxis_title="연도",
+        yaxis_title="비율 (%)",
+        hovermode="x unified",
+        height=380,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+with col_chart2:
+    current_max_code = max_row["sigungu_code"]
+    current_min_code = min_row["sigungu_code"]
+
+    df_max_region = grouped_all[grouped_all["sigungu_code"] == current_max_code]
+    df_min_region = grouped_all[grouped_all["sigungu_code"] == current_min_code]
+
+    fig_region_trend = go.Figure()
+    fig_region_trend.add_trace(
+        go.Scatter(
+            x=df_max_region["연도"],
+            y=df_max_region[target_col],
+            mode="lines+markers",
+            name=f"최고: {max_row['시도']} {max_row['시군구']}",
+            line=dict(color="#d7301f", width=3),
+        )
+    )
+    fig_region_trend.add_trace(
+        go.Scatter(
+            x=df_min_region["연도"],
+            y=df_min_region[target_col],
+            mode="lines+markers",
+            name=f"최저: {min_row['시도']} {min_row['시군구']}",
+            line=dict(color="#2b8cbe", width=3),
+        )
+    )
+
+    fig_region_trend.update_layout(
+        title=f"현재 선택 지표({metric_name}) 양극단 지역 12년 추이",
+        xaxis_title="연도",
+        yaxis_title=f"{metric_name} ({unit_str})",
+        hovermode="x unified",
+        height=380,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_region_trend, use_container_width=True)
+
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# 하단 표 영역
 # -----------------------------------------------------------------------------
 st.subheader(f"📊 {selected_year}년 {metric_name} 상위 및 하위 10개 지역")
 
@@ -345,11 +434,13 @@ bottom_10 = grouped.sort_values(by=target_col, ascending=True).head(10)[
 display_cols = ["시도", "시군구", target_col, "총인구"]
 if metric_option == "고령화율 (65세 이상)":
     display_cols.append("고령인구")
-else:
+elif metric_option == "유소년 비율 (0~14세)":
     display_cols.append("유소년인구")
+else:
+    display_cols.extend(["고령인구", "유소년인구"])
 
 format_dict = {
-    target_col: "{:.1f}%",
+    target_col: f"{{:.1f}}{unit_str}",
     "총인구": "{:,}명",
     "고령인구": "{:,}명",
     "유소년인구": "{:,}명",
