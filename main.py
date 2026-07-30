@@ -96,7 +96,7 @@ def load_data():
 ) = load_data()
 
 # -----------------------------------------------------------------------------
-# 사이드바 컨트롤러 (지표, 연도, 시도 선택)
+# 사이드바 컨트롤러 (지표, 연도, 시도 선택, 애니메이션 모드)
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ 설정")
 
@@ -107,15 +107,27 @@ metric_option = st.sidebar.radio(
     index=0,
 )
 
-# 2. 연도 선택 슬라이더
-available_years = sorted(df_raw["연도"].unique().tolist())
-selected_year = st.sidebar.slider(
-    "📅 연도 선택",
-    min_value=int(min(available_years)),
-    max_value=int(max(available_years)),
-    value=int(max(available_years)),
-    step=1,
+# 2. 애니메이션 재생 여부 선택
+enable_animation = st.sidebar.checkbox(
+    "▶️ 연도별 시계열 애니메이션 모드",
+    value=False,
+    help="체크 시 지도 하단 플레이 버튼으로 연도별 변화 과정을 재생할 수 있습니다.",
 )
+
+# 애니메이션 모드가 아닐 때만 연도 선택 슬라이더 활성화
+available_years = sorted(df_raw["연도"].unique().tolist())
+if not enable_animation:
+    selected_year = st.sidebar.slider(
+        "📅 연도 선택",
+        min_value=int(min(available_years)),
+        max_value=int(max(available_years)),
+        value=int(max(available_years)),
+        step=1,
+    )
+else:
+    # 애니메이션 모드일 경우 가장 최신 연도를 기본값으로 사용 (카드 및 표 표시용)
+    selected_year = int(max(available_years))
+    st.sidebar.info("💡 애니메이션 모드가 활성화되어 슬라이더가 비활성화됩니다.")
 
 # 3. 시도 선택 드롭다운 (지역 확대)
 sido_list = ["전국"] + list(df_raw["시도"].unique())
@@ -123,25 +135,29 @@ sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전
 selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
 
 # -----------------------------------------------------------------------------
-# 선택된 연도의 데이터 집계 및 비율 계산
+# 데이터 집계 및 비율 계산
 # -----------------------------------------------------------------------------
-df_year = df_raw[df_raw["연도"] == selected_year].copy()
-
-# 시군구 단위 인구 합산
-grouped = (
-    df_year.groupby(["sigungu_code", "시도", "시군구"])[total_cols]
+# 연도별, 시군구별 인구 합산
+grouped_all = (
+    df_raw.groupby(["연도", "sigungu_code", "시도", "시군구"])[total_cols]
     .sum()
     .reset_index()
 )
 
-grouped["총인구"] = grouped[total_cols].sum(axis=1)
-grouped["고령인구"] = grouped[elderly_cols].sum(axis=1)
-grouped["유소년인구"] = grouped[youth_cols].sum(axis=1)
+grouped_all["총인구"] = grouped_all[total_cols].sum(axis=1)
+grouped_all["고령인구"] = grouped_all[elderly_cols].sum(axis=1)
+grouped_all["유소년인구"] = grouped_all[youth_cols].sum(axis=1)
 
-grouped["고령화율"] = (grouped["고령인구"] / grouped["총인구"] * 100).round(1)
-grouped["유소년비율"] = (grouped["유소년인구"] / grouped["총인구"] * 100).round(1)
+grouped_all["고령화율"] = (grouped_all["고령인구"] / grouped_all["총인구"] * 100).round(1)
+grouped_all["유소년비율"] = (grouped_all["유소년인구"] / grouped_all["총인구"] * 100).round(1)
 
-# 전국 합계 계산 (상단 카드 표시용)
+# 애니메이션을 위한 정렬 (연도순)
+grouped_all = grouped_all.sort_values(by=["연도", "sigungu_code"])
+
+# 선택된 연도 데이터 추출 (상단 지표 카드 및 하단 표용)
+grouped = grouped_all[grouped_all["연도"] == selected_year].copy()
+
+# 전국 합계 계산
 national_total_pop = grouped["총인구"].sum()
 national_elderly_pop = grouped["고령인구"].sum()
 national_youth_pop = grouped["유소년인구"].sum()
@@ -193,6 +209,10 @@ else:
         "5. 14% 이상": "#d7301f",
     }
 
+# 전체 데이터셋 및 선택 연도 데이터셋 모두 범주화 적용
+grouped_all["비율_구간"] = pd.cut(
+    grouped_all[target_col], bins=bins, labels=labels, right=False
+)
 grouped["비율_구간"] = pd.cut(
     grouped[target_col], bins=bins, labels=labels, right=False
 )
@@ -200,7 +220,8 @@ grouped["비율_구간"] = pd.cut(
 # -----------------------------------------------------------------------------
 # 메인 화면 구성
 # -----------------------------------------------------------------------------
-st.title(f"🗺️ 전국 시군구 {metric_name} 지도 ({selected_year}년)")
+title_year_str = "지난 12년간 변화" if enable_animation else f"{selected_year}년"
+st.title(f"🗺️ 전국 시군구 {metric_name} 지도 ({title_year_str})")
 st.caption(
     f"선택한 지표({metric_name})를 기준으로 시군구별 인구 비율을 5단계 구분도로 시각화합니다."
 )
@@ -214,20 +235,20 @@ col_m1, col_m2, col_m3 = st.columns(3)
 
 with col_m1:
     st.metric(
-        label=f"🌐 전국 평균 {metric_name}",
+        label=f"🌐 전국 평균 {metric_name} ({selected_year}년)",
         value=f"{national_rate:.1f}%",
     )
 
 with col_m2:
     st.metric(
-        label=f"🔴 최고 {metric_name} 지역",
+        label=f"🔴 최고 {metric_name} 지역 ({selected_year}년)",
         value=f"{max_row['시도']} {max_row['시군구']}",
         delta=f"{max_row[target_col]:.1f}%",
     )
 
 with col_m3:
     st.metric(
-        label=f"🔵 최저 {metric_name} 지역",
+        label=f"🔵 최저 {metric_name} 지역 ({selected_year}년)",
         value=f"{min_row['시도']} {min_row['시군구']}",
         delta=f"{min_row[target_col]:.1f}%",
     )
@@ -237,9 +258,17 @@ st.markdown("---")
 # 시도 선택에 따른 지도 바운딩 위치 변경
 map_setting = SIDO_CENTER_MAP.get(selected_sido, SIDO_CENTER_MAP["전국"])
 
+# 애니메이션 모드 여부에 따른 데이터소스 및 타임라인 프레임 설정
+if enable_animation:
+    fig_data = grouped_all
+    animation_frame = "연도"
+else:
+    fig_data = grouped
+    animation_frame = None
+
 # Plotly 구분도 생성
 fig = px.choropleth_mapbox(
-    grouped,
+    fig_data,
     geojson=geojson_data,
     locations="sigungu_code",
     featureidkey="properties.코드",
@@ -256,6 +285,7 @@ fig = px.choropleth_mapbox(
         "유소년인구": ":,명" if metric_option == "유소년 비율 (0~14세)" else False,
         "비율_구간": False,
     },
+    animation_frame=animation_frame,  # 애니메이션 활성화 시 프레임 축 설정
     center=map_setting["center"],
     zoom=map_setting["zoom"],
     mapbox_style="white-bg",  # 타일 없이 경계선만 표시
@@ -267,6 +297,18 @@ fig.update_layout(
     legend_title_text=f"{metric_name} 구간",
     legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01),
 )
+
+# 애니메이션 모드일 때 슬라이더 컨트롤 및 트랜지션 세부 설정
+if enable_animation:
+    fig.update_layout(
+        sliders=[
+            dict(
+                active=len(available_years) - 1,
+                currentvalue={"prefix": "📅 연도: "},
+                pad={"t": 20},
+            )
+        ]
+    )
 
 st.plotly_chart(fig, use_container_width=True)
 
@@ -288,7 +330,7 @@ st.markdown("---")
 # -----------------------------------------------------------------------------
 # 하단 표 영역 (상위 10개 / 하위 10개)
 # -----------------------------------------------------------------------------
-st.subheader(f"📊 {metric_name} 상위 및 하위 10개 지역")
+st.subheader(f"📊 {selected_year}년 {metric_name} 상위 및 하위 10개 지역")
 
 col_table1, col_table2 = st.columns(2)
 
