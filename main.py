@@ -54,9 +54,6 @@ def load_data():
     df["sigungu_code"] = df["코드"].str[:5]
 
     # 행정구역 개편에 따른 과거 시군구 코드 매핑 변환
-    # - 강원: 42 -> 51
-    # - 전북: 45 -> 52
-    # - 군위군: 47720 -> 27720
     def remap_code(code):
         if code == "47720":
             return "27720"
@@ -112,9 +109,9 @@ grouped_all["유소년인구"] = grouped_all[youth_cols].sum(axis=1)
 grouped_all["고령화율"] = (grouped_all["고령인구"] / grouped_all["총인구"] * 100).round(1)
 grouped_all["유소년비율"] = (grouped_all["유소년인구"] / grouped_all["총인구"] * 100).round(1)
 
-# 노령화지수: 유소년 100명당 고령인구 수 (0으로 나누기 방지)
+# 노령화지수 안전 계산 (유소년 0명 방지)
 grouped_all["노령화지수"] = (
-    grouped_all["고령인구"] / grouped_all["유소년인구"].replace(0, pd.NA) * 100
+    grouped_all["고령인구"] / grouped_all["유소년인구"].replace(0, float("nan")) * 100
 ).fillna(0).round(1)
 
 # -----------------------------------------------------------------------------
@@ -122,7 +119,7 @@ grouped_all["노령화지수"] = (
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ 설정")
 
-# 1. 지표 선택 (노령화지수 추가)
+# 1. 지표 선택
 metric_option = st.sidebar.radio(
     "📊 분석 지표 선택",
     ["고령화율 (65세 이상)", "유소년 비율 (0~14세)", "노령화지수 (인구 역전 지표)"],
@@ -139,7 +136,7 @@ selected_year = st.sidebar.slider(
     step=1,
 )
 
-# 3. 시도 선택 드롭다운 (지역 확대)
+# 3. 시도 선택 드롭다운
 sido_list = ["전국"] + list(df_raw["시도"].unique())
 sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전국"]
 selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
@@ -156,16 +153,16 @@ national_youth_pop = grouped["유소년인구"].sum()
 
 national_elderly_rate = round(national_elderly_pop / national_total_pop * 100, 1)
 national_youth_rate = round(national_youth_pop / national_total_pop * 100, 1)
-national_aging_idx = round(national_elderly_pop / national_youth_pop * 100, 1)
+national_aging_idx = round(national_elderly_pop / (national_youth_pop if national_youth_pop > 0 else 1) * 100, 1)
 
-# 지표별 구간(5단계) 및 색상 세팅
+# 지표별 안전한 구간(bins) 및 색상 설정
 if metric_option == "고령화율 (65세 이상)":
     target_col = "고령화율"
     metric_name = "고령화율"
     unit_str = "%"
     national_rate = national_elderly_rate
 
-    bins = [-1, 19, 23, 28, 38, 1000]
+    bins = [-1.0, 19.0, 23.0, 28.0, 38.0, float("inf")]
     labels = [
         "1. 19% 미만",
         "2. 19% 이상 ~ 23% 미만",
@@ -186,7 +183,7 @@ elif metric_option == "유소년 비율 (0~14세)":
     unit_str = "%"
     national_rate = national_youth_rate
 
-    bins = [-1, 8, 10, 12, 14, 1000]
+    bins = [-1.0, 8.0, 10.0, 12.0, 14.0, float("inf")]
     labels = [
         "1. 8% 미만",
         "2. 8% 이상 ~ 10% 미만",
@@ -207,7 +204,7 @@ else:  # 노령화지수
     unit_str = ""
     national_rate = national_aging_idx
 
-    bins = [-1, 100, 200, 300, 500, 10000]
+    bins = [-1.0, 100.0, 200.0, 300.0, 500.0, float("inf")]
     labels = [
         "1. 100 미만 (유소년 > 고령)",
         "2. 100 이상 ~ 200 미만",
@@ -227,7 +224,7 @@ grouped["비율_구간"] = pd.cut(
     grouped[target_col], bins=bins, labels=labels, right=False
 )
 
-# 3번 아이디어: 데이터 다운로드 버튼 (사이드바 하단)
+# 데이터 다운로드 버튼 (사이드바 하단)
 st.sidebar.markdown("---")
 st.sidebar.subheader("📥 데이터 다운로드")
 csv_data = grouped[
@@ -237,7 +234,7 @@ csv_data = grouped[
 st.sidebar.download_button(
     label=f"📄 {selected_year}년 {metric_name} CSV 다운로드",
     data=csv_data,
-    file_name=f"korea_population_{metric_name}_{selected_year}.csv",
+    file_name=f"korea_population_{selected_year}.csv",
     mime="text/csv",
 )
 
@@ -249,11 +246,14 @@ st.caption(
     f"선택한 지표({metric_name})를 기준으로 시군구별 인구 비율을 5단계 구분도로 시각화합니다."
 )
 
-# 최고 / 최저 지역 추출
-max_row = grouped.loc[grouped[target_col].idxmax()]
-min_row = grouped.loc[grouped[target_col].idxmin()]
+# 최고 / 최저 지역 안전 추출
+max_idx = grouped[target_col].idxmax()
+min_idx = grouped[target_col].idxmin()
 
-# 지도 상단 지표 카드 3개 나란히 배치
+max_row = grouped.loc[max_idx]
+min_row = grouped.loc[min_idx]
+
+# 지도 상단 지표 카드 3개
 col_m1, col_m2, col_m3 = st.columns(3)
 
 with col_m1:
@@ -278,7 +278,7 @@ with col_m3:
 
 st.markdown("---")
 
-# 시도 선택에 따른 지도 바운딩 위치 변경
+# 시도 선택 위치 반영
 map_setting = SIDO_CENTER_MAP.get(selected_sido, SIDO_CENTER_MAP["전국"])
 
 # Plotly 구분도 생성
@@ -314,9 +314,7 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# 경계 지도 데이터 미매핑 지역 안내
-# -----------------------------------------------------------------------------
+# 경계 데이터 미매핑 안내
 unmapped = grouped[~grouped["sigungu_code"].isin(valid_geojson_codes)]
 if not unmapped.empty:
     unmapped_names = (
@@ -330,11 +328,10 @@ if not unmapped.empty:
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 📈 [신규] 12년간 인구구조 추이 선 그래프 (하단 고정)
+# 📈 12년간 인구구조 추이 선 그래프
 # -----------------------------------------------------------------------------
-st.subheader("📈 지난 12년간(2015~2026년) 주요 인구 지표 추이 분석")
+st.subheader("📈 지난 12년간 주요 인구 지표 추이 분석")
 
-# 연도별 전국 합계 추이 계산
 national_trend = (
     grouped_all.groupby("연도")[["총인구", "고령인구", "유소년인구"]]
     .sum()
@@ -346,14 +343,10 @@ national_trend["고령화율"] = (
 national_trend["유소년비율"] = (
     national_trend["유소년인구"] / national_trend["총인구"] * 100
 ).round(1)
-national_trend["노령화지수"] = (
-    national_trend["고령인구"] / national_trend["유소년인구"] * 100
-).round(1)
 
 col_chart1, col_chart2 = st.columns(2)
 
 with col_chart1:
-    # 1. 전국 유소년 비율 vs 고령화율 비교 추이 그래프
     fig_trend = go.Figure()
     fig_trend.add_trace(
         go.Scatter(
@@ -385,7 +378,6 @@ with col_chart1:
     st.plotly_chart(fig_trend, use_container_width=True)
 
 with col_chart2:
-    # 2. 유소년 비율 최고/최저 시군구 12년 추이 비교
     current_max_code = max_row["sigungu_code"]
     current_min_code = min_row["sigungu_code"]
 
@@ -425,7 +417,7 @@ with col_chart2:
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 하단 표 영역 (상위 10개 / 하위 10개)
+# 하단 표 영역
 # -----------------------------------------------------------------------------
 st.subheader(f"📊 {selected_year}년 {metric_name} 상위 및 하위 10개 지역")
 
