@@ -45,14 +45,14 @@ def load_data():
         f["properties"]["코드"] for f in geojson_data["features"]
     )
 
-    # 2. 인구 CSV 데이터 불러오기
+    # 2. 인구 CSV 데이터 불러오기 (코드 열은 문자열로 처리)
     csv_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
     df = pd.read_csv(csv_url, dtype={"코드": str})
 
     # '코드' 열의 앞 5자리를 시군구 코드로 사용
     df["sigungu_code"] = df["코드"].str[:5]
 
-    # 행정구역 개편에 따른 과거 시군구 코드 변경 처리
+    # 행정구역 개편에 따른 과거 시군구 코드 매핑 변환
     # - 강원: 42 -> 51
     # - 전북: 45 -> 52
     # - 군위군: 47720 -> 27720
@@ -100,14 +100,14 @@ def load_data():
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ 설정")
 
-# 지표 선택
+# 1. 지표 선택
 metric_option = st.sidebar.radio(
     "📊 분석 지표 선택",
     ["고령화율 (65세 이상)", "유소년 비율 (0~14세)"],
     index=0,
 )
 
-# 연도 선택 슬라이더
+# 2. 연도 선택 슬라이더
 available_years = sorted(df_raw["연도"].unique().tolist())
 selected_year = st.sidebar.slider(
     "📅 연도 선택",
@@ -117,18 +117,17 @@ selected_year = st.sidebar.slider(
     step=1,
 )
 
-# 시도 선택 드롭다운
+# 3. 시도 선택 드롭다운 (지역 확대)
 sido_list = ["전국"] + list(df_raw["시도"].unique())
-# 세종/강원/전북 등 최신 명칭 정리 반영
 sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전국"]
 selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
 
 # -----------------------------------------------------------------------------
-# 선택된 연도의 데이터집계 및 비율 계산
+# 선택된 연도의 데이터 집계 및 비율 계산
 # -----------------------------------------------------------------------------
 df_year = df_raw[df_raw["연도"] == selected_year].copy()
 
-# 시군구 단위 집계
+# 시군구 단위 인구 합산
 grouped = (
     df_year.groupby(["sigungu_code", "시도", "시군구"])[total_cols]
     .sum()
@@ -142,7 +141,7 @@ grouped["유소년인구"] = grouped[youth_cols].sum(axis=1)
 grouped["고령화율"] = (grouped["고령인구"] / grouped["총인구"] * 100).round(1)
 grouped["유소년비율"] = (grouped["유소년인구"] / grouped["총인구"] * 100).round(1)
 
-# 전국 합계 계산 (지표 카드용)
+# 전국 합계 계산 (상단 카드 표시용)
 national_total_pop = grouped["총인구"].sum()
 national_elderly_pop = grouped["고령인구"].sum()
 national_youth_pop = grouped["유소년인구"].sum()
@@ -150,13 +149,13 @@ national_youth_pop = grouped["유소년인구"].sum()
 national_elderly_rate = round(national_elderly_pop / national_total_pop * 100, 1)
 national_youth_rate = round(national_youth_pop / national_total_pop * 100, 1)
 
-# 선택된 지표에 따른 칼럼 및 색상 구간 설정
+# 선택된 지표에 따른 타겟 칼럼 및 색상 구간(5단계) 설정
 if metric_option == "고령화율 (65세 이상)":
     target_col = "고령화율"
     metric_name = "고령화율"
     national_rate = national_elderly_rate
 
-    # 고령화율 5단계 구간 (19%, 23%, 28%, 38%)
+    # 고령화율 고정 구간: 19%, 23%, 28%, 38%
     bins = [-1, 19, 23, 28, 38, 100]
     labels = [
         "1. 19% 미만",
@@ -165,7 +164,6 @@ if metric_option == "고령화율 (65세 이상)":
         "4. 28% 이상 ~ 38% 미만",
         "5. 38% 이상",
     ]
-    # 녹색 계열 팔레트 (옅은 색 -> 진한 색)
     color_map = {
         "1. 19% 미만": "#edf8e9",
         "2. 19% 이상 ~ 23% 미만": "#bae4b3",
@@ -178,7 +176,7 @@ else:
     metric_name = "유소년 비율"
     national_rate = national_youth_rate
 
-    # 유소년 비율 5단계 구간 (8%, 10%, 12%, 14%)
+    # 유소년 비율 맞춤 구간: 8%, 10%, 12%, 14%
     bins = [-1, 8, 10, 12, 14, 100]
     labels = [
         "1. 8% 미만",
@@ -187,7 +185,6 @@ else:
         "4. 12% 이상 ~ 14% 미만",
         "5. 14% 이상",
     ]
-    # 주황/청색 계열 팔레트 (낮음: 옅은 주황 -> 높음: 진한 푸른색)
     color_map = {
         "1. 8% 미만": "#fef0d9",
         "2. 8% 이상 ~ 10% 미만": "#fdd49e",
@@ -208,11 +205,11 @@ st.caption(
     f"선택한 지표({metric_name})를 기준으로 시군구별 인구 비율을 5단계 구분도로 시각화합니다."
 )
 
-# 최고/최저 시군구 계산
+# 최고 / 최저 지역 추출
 max_row = grouped.loc[grouped[target_col].idxmax()]
 min_row = grouped.loc[grouped[target_col].idxmin()]
 
-# 지도 위 상단 지표 카드 3개
+# 지도 상단 지표 카드 3개 나란히 배치
 col_m1, col_m2, col_m3 = st.columns(3)
 
 with col_m1:
@@ -237,10 +234,8 @@ with col_m3:
 
 st.markdown("---")
 
-# 지도 위치 및 확대 축소 설정
-map_setting = SIDO_CENTER_MAP.get(
-    selected_sido, SIDO_CENTER_MAP["전국"]
-)
+# 시도 선택에 따른 지도 바운딩 위치 변경
+map_setting = SIDO_CENTER_MAP.get(selected_sido, SIDO_CENTER_MAP["전국"])
 
 # Plotly 구분도 생성
 fig = px.choropleth_mapbox(
@@ -263,7 +258,7 @@ fig = px.choropleth_mapbox(
     },
     center=map_setting["center"],
     zoom=map_setting["zoom"],
-    mapbox_style="white-bg",
+    mapbox_style="white-bg",  # 타일 없이 경계선만 표시
 )
 
 fig.update_layout(
@@ -276,7 +271,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 경계 데이터 미매핑 안내 문구 처리
+# 경계 지도 데이터 미매핑 지역 안내
 # -----------------------------------------------------------------------------
 unmapped = grouped[~grouped["sigungu_code"].isin(valid_geojson_codes)]
 if not unmapped.empty:
@@ -311,7 +306,12 @@ if metric_option == "고령화율 (65세 이상)":
 else:
     display_cols.append("유소년인구")
 
-format_dict = {target_col: "{:.1f}%", "총인구": "{:,}명", "고령인구": "{:,}명", "유소년인구": "{:,}명"}
+format_dict = {
+    target_col: "{:.1f}%",
+    "총인구": "{:,}명",
+    "고령인구": "{:,}명",
+    "유소년인구": "{:,}명",
+}
 
 with col_table1:
     st.markdown(f"### 🔴 {metric_name} 가장 높은 10곳")
