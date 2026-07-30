@@ -5,64 +5,158 @@ import streamlit as st
 
 # Streamlit 페이지 기본 설정
 st.set_page_config(
-    page_title="전국 시군구 고령화 지도",
+    page_title="전국 인구구조 지도",
     page_icon="🗺️",
     layout="wide",
 )
 
+# 시도별 중심 좌표 및 Zoom 레벨 매핑
+SIDO_CENTER_MAP = {
+    "전국": {"center": {"lat": 35.9, "lon": 127.8}, "zoom": 6.2},
+    "서울특별시": {"center": {"lat": 37.5665, "lon": 126.9780}, "zoom": 9.5},
+    "부산광역시": {"center": {"lat": 35.1796, "lon": 129.0756}, "zoom": 9.5},
+    "대구광역시": {"center": {"lat": 35.8714, "lon": 128.6014}, "zoom": 9.0},
+    "인천광역시": {"center": {"lat": 37.4563, "lon": 126.7052}, "zoom": 9.0},
+    "광주광역시": {"center": {"lat": 35.1595, "lon": 126.8526}, "zoom": 10.0},
+    "대전광역시": {"center": {"lat": 36.3504, "lon": 127.3845}, "zoom": 10.0},
+    "울산광역시": {"center": {"lat": 35.5384, "lon": 129.3114}, "zoom": 9.5},
+    "세종특별자치시": {"center": {"lat": 36.4800, "lon": 127.2890}, "zoom": 10.5},
+    "경기도": {"center": {"lat": 37.4138, "lon": 127.5183}, "zoom": 8.0},
+    "강원특별자치도": {"center": {"lat": 37.8228, "lon": 128.1555}, "zoom": 7.8},
+    "충청북도": {"center": {"lat": 36.6357, "lon": 127.4912}, "zoom": 8.2},
+    "충청남도": {"center": {"lat": 36.5184, "lon": 126.8000}, "zoom": 8.2},
+    "전북특별자치도": {"center": {"lat": 35.7175, "lon": 127.1530}, "zoom": 8.2},
+    "전라남도": {"center": {"lat": 34.8679, "lon": 126.9910}, "zoom": 7.8},
+    "경상북도": {"center": {"lat": 36.4919, "lon": 128.8889}, "zoom": 7.8},
+    "경상남도": {"center": {"lat": 35.4606, "lon": 128.2132}, "zoom": 8.0},
+    "제주특별자치도": {"center": {"lat": 33.4890, "lon": 126.4983}, "zoom": 9.0},
+}
+
 
 @st.cache_data
 def load_data():
-    """인구 데이터와 GeoJSON 지리 경계 데이터를 로드하고 전처리하는 함수입니다.
-
-    캐싱(@st.cache_data)을 적용하여 앱 재실행 시 속도를 높입니다.
-    """
+    """인구 데이터와 GeoJSON 경계 데이터를 불러와 전처리하는 함수입니다."""
     # 1. GeoJSON 경계 데이터 불러오기
     geojson_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
     geojson_data = requests.get(geojson_url).json()
 
-    # 2. 인구 CSV 데이터 불러오기 (코드 열을 문자열로 읽도록 dtype 지정)
+    # GeoJSON에 존재하는 시군구 코드 집합 생성
+    valid_geojson_codes = set(
+        f["properties"]["코드"] for f in geojson_data["features"]
+    )
+
+    # 2. 인구 CSV 데이터 불러오기
     csv_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
     df = pd.read_csv(csv_url, dtype={"코드": str})
 
-    # '코드' 열의 앞 5자리를 추출하여 시군구 코드로 사용
+    # '코드' 열의 앞 5자리를 시군구 코드로 사용
     df["sigungu_code"] = df["코드"].str[:5]
 
-    # 데이터 중 가장 최신 연도 추출
-    latest_year = df["연도"].max()
-    df_latest = df[df["연도"] == latest_year].copy()
+    # 행정구역 개편에 따른 과거 시군구 코드 변경 처리
+    # - 강원: 42 -> 51
+    # - 전북: 45 -> 52
+    # - 군위군: 47720 -> 27720
+    def remap_code(code):
+        if code == "47720":
+            return "27720"
+        elif code.startswith("42"):
+            return "51" + code[2:]
+        elif code.startswith("45"):
+            return "52" + code[2:]
+        return code
 
-    # 3. 고령 인구 및 총인구 계산
-    # '계_0세'부터 '계_100세 이상'까지 모든 총인구 열(계_) 추출
-    total_cols = [c for c in df_latest.columns if c.startswith("계_")]
+    df["sigungu_code"] = df["sigungu_code"].apply(remap_code)
 
-    # 65세 이상에 해당하는 '계_65세' ~ '계_100세 이상' 열 추출
+    # 전체 나이 열 목록 (계_0세 ~ 계_100세 이상)
+    total_cols = [c for c in df.columns if c.startswith("계_")]
+
+    # 유소년(0~14세) 및 고령(65세 이상) 열 구분
+    youth_cols = []
     elderly_cols = []
     for c in total_cols:
-        # '계_X세' 형태에서 숫자 부분만 추출하여 판별
         age_str = c.replace("계_", "").replace("세 이상", "").replace("세", "")
-        if age_str.isdigit() and int(age_str) >= 65:
-            elderly_cols.append(c)
+        if age_str.isdigit():
+            age = int(age_str)
+            if age <= 14:
+                youth_cols.append(c)
+            elif age >= 65:
+                elderly_cols.append(c)
 
-    # 읍면동 데이터를 시군구(5자리 코드) 단위로 합산
-    grouped = (
-        df_latest.groupby(["sigungu_code", "시도", "시군구"])[
-            total_cols
-        ]
-        .sum()
-        .reset_index()
-    )
+    return df, total_cols, youth_cols, elderly_cols, geojson_data, valid_geojson_codes
 
-    # 총인구 및 65세 이상 인구 합계 계산
-    grouped["총인구"] = grouped[total_cols].sum(axis=1)
-    grouped["고령인구"] = grouped[elderly_cols].sum(axis=1)
 
-    # 고령화율(%) 계산 (소수점 첫째 자리까지 반올림)
-    grouped["고령화율"] = (
-        grouped["고령인구"] / grouped["총인구"] * 100
-    ).round(1)
+# 데이터 로드
+(
+    df_raw,
+    total_cols,
+    youth_cols,
+    elderly_cols,
+    geojson_data,
+    valid_geojson_codes,
+) = load_data()
 
-    # 4. 고령화율을 5개 범주로 나눔 (구간: 19% 미만, 19%~23%, 23%~28%, 28%~38%, 38% 이상)
+# -----------------------------------------------------------------------------
+# 사이드바 컨트롤러 (지표, 연도, 시도 선택)
+# -----------------------------------------------------------------------------
+st.sidebar.title("⚙️ 설정")
+
+# 지표 선택
+metric_option = st.sidebar.radio(
+    "📊 분석 지표 선택",
+    ["고령화율 (65세 이상)", "유소년 비율 (0~14세)"],
+    index=0,
+)
+
+# 연도 선택 슬라이더
+available_years = sorted(df_raw["연도"].unique().tolist())
+selected_year = st.sidebar.slider(
+    "📅 연도 선택",
+    min_value=int(min(available_years)),
+    max_value=int(max(available_years)),
+    value=int(max(available_years)),
+    step=1,
+)
+
+# 시도 선택 드롭다운
+sido_list = ["전국"] + list(df_raw["시도"].unique())
+# 세종/강원/전북 등 최신 명칭 정리 반영
+sido_options = [s for s in SIDO_CENTER_MAP.keys() if s in sido_list or s == "전국"]
+selected_sido = st.sidebar.selectbox("📍 지역 선택 (확대)", sido_options)
+
+# -----------------------------------------------------------------------------
+# 선택된 연도의 데이터집계 및 비율 계산
+# -----------------------------------------------------------------------------
+df_year = df_raw[df_raw["연도"] == selected_year].copy()
+
+# 시군구 단위 집계
+grouped = (
+    df_year.groupby(["sigungu_code", "시도", "시군구"])[total_cols]
+    .sum()
+    .reset_index()
+)
+
+grouped["총인구"] = grouped[total_cols].sum(axis=1)
+grouped["고령인구"] = grouped[elderly_cols].sum(axis=1)
+grouped["유소년인구"] = grouped[youth_cols].sum(axis=1)
+
+grouped["고령화율"] = (grouped["고령인구"] / grouped["총인구"] * 100).round(1)
+grouped["유소년비율"] = (grouped["유소년인구"] / grouped["총인구"] * 100).round(1)
+
+# 전국 합계 계산 (지표 카드용)
+national_total_pop = grouped["총인구"].sum()
+national_elderly_pop = grouped["고령인구"].sum()
+national_youth_pop = grouped["유소년인구"].sum()
+
+national_elderly_rate = round(national_elderly_pop / national_total_pop * 100, 1)
+national_youth_rate = round(national_youth_pop / national_total_pop * 100, 1)
+
+# 선택된 지표에 따른 칼럼 및 색상 구간 설정
+if metric_option == "고령화율 (65세 이상)":
+    target_col = "고령화율"
+    metric_name = "고령화율"
+    national_rate = national_elderly_rate
+
+    # 고령화율 5단계 구간 (19%, 23%, 28%, 38%)
     bins = [-1, 19, 23, 28, 38, 100]
     labels = [
         "1. 19% 미만",
@@ -71,99 +165,166 @@ def load_data():
         "4. 28% 이상 ~ 38% 미만",
         "5. 38% 이상",
     ]
+    # 녹색 계열 팔레트 (옅은 색 -> 진한 색)
+    color_map = {
+        "1. 19% 미만": "#edf8e9",
+        "2. 19% 이상 ~ 23% 미만": "#bae4b3",
+        "3. 23% 이상 ~ 28% 미만": "#74c476",
+        "4. 28% 이상 ~ 38% 미만": "#31a354",
+        "5. 38% 이상": "#006d2c",
+    }
+else:
+    target_col = "유소년비율"
+    metric_name = "유소년 비율"
+    national_rate = national_youth_rate
 
-    grouped["고령화_구간"] = pd.cut(
-        grouped["고령화율"], bins=bins, labels=labels, right=False
+    # 유소년 비율 5단계 구간 (8%, 10%, 12%, 14%)
+    bins = [-1, 8, 10, 12, 14, 100]
+    labels = [
+        "1. 8% 미만",
+        "2. 8% 이상 ~ 10% 미만",
+        "3. 10% 이상 ~ 12% 미만",
+        "4. 12% 이상 ~ 14% 미만",
+        "5. 14% 이상",
+    ]
+    # 주황/청색 계열 팔레트 (낮음: 옅은 주황 -> 높음: 진한 푸른색)
+    color_map = {
+        "1. 8% 미만": "#fef0d9",
+        "2. 8% 이상 ~ 10% 미만": "#fdd49e",
+        "3. 10% 이상 ~ 12% 미만": "#fdbb84",
+        "4. 12% 이상 ~ 14% 미만": "#fc8d59",
+        "5. 14% 이상": "#d7301f",
+    }
+
+grouped["비율_구간"] = pd.cut(
+    grouped[target_col], bins=bins, labels=labels, right=False
+)
+
+# -----------------------------------------------------------------------------
+# 메인 화면 구성
+# -----------------------------------------------------------------------------
+st.title(f"🗺️ 전국 시군구 {metric_name} 지도 ({selected_year}년)")
+st.caption(
+    f"선택한 지표({metric_name})를 기준으로 시군구별 인구 비율을 5단계 구분도로 시각화합니다."
+)
+
+# 최고/최저 시군구 계산
+max_row = grouped.loc[grouped[target_col].idxmax()]
+min_row = grouped.loc[grouped[target_col].idxmin()]
+
+# 지도 위 상단 지표 카드 3개
+col_m1, col_m2, col_m3 = st.columns(3)
+
+with col_m1:
+    st.metric(
+        label=f"🌐 전국 평균 {metric_name}",
+        value=f"{national_rate:.1f}%",
     )
 
-    return latest_year, grouped, geojson_data
+with col_m2:
+    st.metric(
+        label=f"🔴 최고 {metric_name} 지역",
+        value=f"{max_row['시도']} {max_row['시군구']}",
+        delta=f"{max_row[target_col]:.1f}%",
+    )
 
-
-# 데이터 로드
-latest_year, df_sigungu, geojson_data = load_data()
-
-# App 타이틀 영역
-st.title(f"🗺️ 전국 시군구 고령화 지도 ({latest_year}년 기준)")
-st.caption(
-    "65세 이상 인구 비율을 기준(19%, 23%, 28%, 38%)으로 5단계 구분도를 시각화합니다."
-)
-
-# 색상 팔레트 설정 (연한 색 -> 진한 색)
-color_map = {
-    "1. 19% 미만": "#edf8e9",
-    "2. 19% 이상 ~ 23% 미만": "#bae4b3",
-    "3. 23% 이상 ~ 28% 미만": "#74c476",
-    "4. 28% 이상 ~ 38% 미만": "#31a354",
-    "5. 38% 이상": "#006d2c",
-}
-
-# Plotly 지도 생성
-fig = px.choropleth_mapbox(
-    df_sigungu,
-    geojson=geojson_data,
-    locations="sigungu_code",  # GeoJSON 매핑용 코드
-    featureidkey="properties.코드",  # GeoJSON 내부 속성 키
-    color="고령화_구간",  # 색상 기준이 되는 5단계 범주
-    color_discrete_map=color_map,  # 지정된 색상 매핑 사용
-    category_orders={"고령화_구간": list(color_map.keys())},  # 범례 순서 정렬
-    hover_name="시군구",  # 툴팁 제목
-    hover_data={
-        "sigungu_code": False,  # 코드 숨김
-        "시도": True,  # 시도 명칭 표시
-        "고령화율": ":.1f%",  # 고령화율 퍼센트 표시
-        "총인구": ":,명",  # 총인구 천단위 쉼표 표시
-        "고령인구": ":,명",  # 고령인구 천단위 쉼표 표시
-        "고령화_구간": False,  # 구간 명칭 툴팁에서는 숨김
-    },
-    center={"lat": 35.9, "lon": 127.8},  # 대한민국 중심 좌표
-    zoom=6.2,  # 초기 확대 비율
-    mapbox_style="white-bg",  # 지도 배경 타일 없이 경계선만 표시
-)
-
-# 지도 레이아웃 세부 조정
-fig.update_layout(
-    margin={"r": 0, "t": 10, "l": 0, "b": 0},
-    height=650,
-    legend_title_text="고령화율 구간",
-    legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01),
-)
-
-# 지도 화면 출력
-st.plotly_chart(fig, use_container_width=True)
+with col_m3:
+    st.metric(
+        label=f"🔵 최저 {metric_name} 지역",
+        value=f"{min_row['시도']} {min_row['시군구']}",
+        delta=f"{min_row[target_col]:.1f}%",
+    )
 
 st.markdown("---")
 
-# 지도 하단 상위/하위 10개 지역 표 출력
-st.subheader("📊 고령화율 극단 지역 비교")
+# 지도 위치 및 확대 축소 설정
+map_setting = SIDO_CENTER_MAP.get(
+    selected_sido, SIDO_CENTER_MAP["전국"]
+)
 
-col1, col2 = st.columns(2)
+# Plotly 구분도 생성
+fig = px.choropleth_mapbox(
+    grouped,
+    geojson=geojson_data,
+    locations="sigungu_code",
+    featureidkey="properties.코드",
+    color="비율_구간",
+    color_discrete_map=color_map,
+    category_orders={"비율_구간": list(color_map.keys())},
+    hover_name="시군구",
+    hover_data={
+        "sigungu_code": False,
+        "시도": True,
+        target_col: ":.1f%",
+        "총인구": ":,명",
+        "고령인구": ":,명" if metric_option == "고령화율 (65세 이상)" else False,
+        "유소년인구": ":,명" if metric_option == "유소년 비율 (0~14세)" else False,
+        "비율_구간": False,
+    },
+    center=map_setting["center"],
+    zoom=map_setting["zoom"],
+    mapbox_style="white-bg",
+)
 
-# 고령화율 높은 순 상위 10개
-top_10 = df_sigungu.sort_values(by="고령화율", ascending=False).head(10)[
-    ["시도", "시군구", "고령화율", "총인구", "고령인구"]
+fig.update_layout(
+    margin={"r": 0, "t": 10, "l": 0, "b": 0},
+    height=650,
+    legend_title_text=f"{metric_name} 구간",
+    legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01),
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# 경계 데이터 미매핑 안내 문구 처리
+# -----------------------------------------------------------------------------
+unmapped = grouped[~grouped["sigungu_code"].isin(valid_geojson_codes)]
+if not unmapped.empty:
+    unmapped_names = (
+        unmapped["시도"] + " " + unmapped["시군구"]
+    ).unique().tolist()
+    st.info(
+        f"ℹ️ **행정구역 변경 안내**: 선택하신 {selected_year}년 데이터 중 일부 옛 지역"
+        f"({', '.join(unmapped_names)})은 현재 경계 지도(GeoJSON)와 코드가 일치하지 않아 지도에서 회색(미매핑)으로 표시됩니다."
+    )
+
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# 하단 표 영역 (상위 10개 / 하위 10개)
+# -----------------------------------------------------------------------------
+st.subheader(f"📊 {metric_name} 상위 및 하위 10개 지역")
+
+col_table1, col_table2 = st.columns(2)
+
+top_10 = grouped.sort_values(by=target_col, ascending=False).head(10)[
+    ["시도", "시군구", target_col, "총인구", "고령인구", "유소년인구"]
 ]
 
-# 고령화율 낮은 순 하위 10개
-bottom_10 = df_sigungu.sort_values(by="고령화율", ascending=True).head(10)[
-    ["시도", "시군구", "고령화율", "총인구", "고령인구"]
+bottom_10 = grouped.sort_values(by=target_col, ascending=True).head(10)[
+    ["시도", "시군구", target_col, "총인구", "고령인구", "유소년인구"]
 ]
 
-with col1:
-    st.markdown("### 🔴 고령화율 가장 높은 10곳")
+display_cols = ["시도", "시군구", target_col, "총인구"]
+if metric_option == "고령화율 (65세 이상)":
+    display_cols.append("고령인구")
+else:
+    display_cols.append("유소년인구")
+
+format_dict = {target_col: "{:.1f}%", "총인구": "{:,}명", "고령인구": "{:,}명", "유소년인구": "{:,}명"}
+
+with col_table1:
+    st.markdown(f"### 🔴 {metric_name} 가장 높은 10곳")
     st.dataframe(
-        top_10.style.format(
-            {"고령화율": "{:.1f}%", "총인구": "{:,}명", "고령인구": "{:,}명"}
-        ),
+        top_10[display_cols].style.format(format_dict),
         use_container_width=True,
         hide_index=True,
     )
 
-with col2:
-    st.markdown("### 🔵 고령화율 가장 낮은 10곳")
+with col_table2:
+    st.markdown(f"### 🔵 {metric_name} 가장 낮은 10곳")
     st.dataframe(
-        bottom_10.style.format(
-            {"고령화율": "{:.1f}%", "총인구": "{:,}명", "고령인구": "{:,}명"}
-        ),
+        bottom_10[display_cols].style.format(format_dict),
         use_container_width=True,
         hide_index=True,
     )
